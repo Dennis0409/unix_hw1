@@ -12,45 +12,35 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
-static int (*real_open)(const char *, int,mode_t);
-static ssize_t (*real_read)(int , void *, size_t );
-static ssize_t (*real_write)(int , const void* , size_t );
-static int (*real_connect)(int , const struct sockaddr *, socklen_t );
-static int (*real_getaddrinfo)(const char *, const char *, const struct addrinfo *, struct addrinfo **);
-static int (*real_system)(const char *);
+int (*real_open)(const char *, int,mode_t);
+ssize_t (*real_read)(int , void *, size_t );
+ssize_t (*real_write)(int , const void* , size_t );
+int (*real_connect)(int , const struct sockaddr *, socklen_t );
+int (*real_getaddrinfo)(const char *, const char *, const struct addrinfo *, struct addrinfo **);
+int (*real_system)(const char *);
+char* call_list[]={"open","read","connect","getaddrinfo","system","write"};
+unsigned long call_addr[6];//recode function relative address
 char block_list[4][1024][1024]={0};
-void block_string(); 
 /*
 open : 0
 read : 1
 connect : 2
 getaddrinfo : 3
 */
+void block_string(); 
 int __libc_start_main(int *(main) (int, char * *, char * *), int argc, char * * argv, void (*init) (void), void (*fini) (void), void (*rtld_fini) (void), void (* stack_end)){
     // Load the real __libc_start_main
+    //dlopen(libc.so.6) ---->  dlsym("_libc_start_main")
     void*handle=dlopen("libc.so.6",RTLD_LAZY);
-    //int (*real___libc_start_main)(int (*main)(int, char**, char**), int argc, char **ubp_av, void (*init)(void), void (*fini)(void), void (*rtld_fini)(void), void (*stack_end));
-    
-    //real___libc_start_main = dlsym(RTLD_NEXT, "__libc_start_main");
-
     int (*real__libc_start_main)(int *(main) (int, char * *, char * *), int argc, char * * argv, void (*init) (void), void (*fini) (void), void (*rtld_fini) (void), void (* stack_end));
     real__libc_start_main=dlsym(handle,"__libc_start_main");
     dlclose(handle);
     // Load the real functions we need to hijack
-    
     // Hijack the entry point and perform the necessary initializations
-    //system("cat /proc/self/maps");
-    //printf("-----------test_t\n");
-    //long open_addr;
-
     block_string();
-    
-    init_t(argv);
-    printf("exit\n");
-    //dlopen(libc.so.6) ---->  dlsym("_libc_start_main")
-    //先call 真正的open 存起來 再蓋掉got table的位置 則使用時會呼叫到我的open 進行監控後再決定是否呼叫真正的open
-    //printf("intit ok\n");
-    
+    init_t();
+    //先call真正的function存起來,再蓋掉got table的位置,使用時會呼叫到function_t進行監控後再決定是否呼叫真正的open
+
     // Call the real __libc_start_main
     return (*real__libc_start_main)(main, argc, argv, init, fini, rtld_fini, stack_end);
 }
@@ -72,25 +62,19 @@ void block_string(){
             strncpy(temp,buf,strlen(buf)-2);
             if(strlen(temp)==0) continue;
             memcpy(block_list[idx][sub_idx++],temp,strlen(temp));
-            //printf("idx %d block : %s\n",idx,block_list[idx][sub_idx-1]);
         }
     }
     fclose(fp);
 }
 int open_t(const char *pathname, int flags,mode_t mode){
-    
-    //printf("pass open\n");
     char* LOGGER_FD=getenv("LOGGER_FD");
     long log=strtol(LOGGER_FD,NULL,10);
-
-    //printf("%s\n",pathname);
     char keyword[1024];
     if(realpath(pathname,keyword)==NULL){
         fprintf(stderr,"open_realpath_fail");
         exit(EXIT_FAILURE);
     }
     for(int i=0;i<1024;i++){
-        //printf("block_list[0][i]:%s\n",block_list[0][i]);
         if(block_list[0][i][0]=='\0'){
             break;
         }
@@ -103,19 +87,19 @@ int open_t(const char *pathname, int flags,mode_t mode){
     
     int open_return=real_open(pathname,flags,mode);
     dprintf(log,"[logger] open (\"%s\",%d,%p) = %d\n",pathname,flags,mode,open_return);
-    //return (*real_open)(pathname,flags,mode);
     return open_return;
 }
 ssize_t read_t(int fd,void*buf,size_t count){
-    //printf("fd %d count:%d\n",fd,count);
     char* LOGGER_FD=getenv("LOGGER_FD");
     long log=strtol(LOGGER_FD,NULL,10);
     
     pid_t pid=getpid();
     char filename[100];
     sprintf(filename,"%d-%d-read.log",pid,fd);
+    char write_buf[100000];
+    ssize_t r=real_read(fd,write_buf,count);
     //printf("filename:%s\n",filename);
-    char prev_buf[10240]="";
+    char prev_buf[100000]="";
     int prev_fd=-1;
     int prev=0;
     mode_t fileMode = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
@@ -123,17 +107,15 @@ ssize_t read_t(int fd,void*buf,size_t count){
         prev=1;
     }
     prev_fd=open(filename,O_RDWR|O_CREAT,fileMode);
-    //printf("prev_fd:%d\n",prev_fd);
     for(int i=0;i<1024;i++){
-        //printf("block_list[1][i]:%s\n",block_list[1][i]);
         if(block_list[1][i][0]=='\0'){
             break;
         }
         if(prev==1){
             lseek(prev_fd,-strlen(block_list[1][i]),SEEK_END);
-            real_read(prev_fd,prev_buf,10240);
-            char temp[10240]="";
-            strncpy(temp,buf,strlen(block_list[1][i]));
+            real_read(prev_fd,prev_buf,strlen(block_list[1][i])+1);
+            char temp[100000]="";
+            strcpy(temp,write_buf);
             strcat(prev_buf,temp);
             if(strstr(prev_buf,block_list[1][i])!=NULL){
                 errno=EIO;
@@ -143,20 +125,18 @@ ssize_t read_t(int fd,void*buf,size_t count){
             memset(prev_buf,0,sizeof(prev_buf));
             lseek(prev_fd,0,SEEK_END);
         }else{
-            if(strstr(buf,block_list[1][i])!=NULL){
+            if(strstr(write_buf,block_list[1][i])!=NULL){
                 errno=EIO;
                 dprintf(log,"[logger] read (%d,%p,%ld) = -1\n",fd,&buf,count);
                 return -1;
             }
         }
     }
-    real_write(prev_fd,buf,strlen(buf));
+    real_write(prev_fd,write_buf,r);
     close(prev_fd);
-    long read_return=real_read(fd,buf,count);
-    dprintf(log,"[logger] read (%d,%p,%ld) = %ld\n",fd,&buf,count,read_return);
-    buf=NULL;
-    return read_return;
-    //return (*real_read)(fd,buf,count);
+    dprintf(log,"[logger] read (%d,%p,%ld) = %ld\n",fd,&buf,count,r);
+    memcpy(buf,write_buf,r);
+    return r;
 }
 ssize_t write_t(int fd, const void *buf, size_t count){
     //printf("pass write\n");
@@ -178,21 +158,12 @@ ssize_t write_t(int fd, const void *buf, size_t count){
     char* LOGGER_FD=getenv("LOGGER_FD");
     long log=strtol(LOGGER_FD,NULL,10);
     dprintf(log,"[logger] write (%d,%p,%ld) = %ld\n",fd,&buf,count,strlen(buf));
-    return (*real_write)(fd,buf,count);
+    return real_write(fd,buf,count);
 }
 int connect_t(int sockfd, const struct sockaddr *addr, socklen_t addrlen){
-    //printf("connect ok\n");
     char *ip_s=inet_ntoa(((struct sockaddr_in *)addr)->sin_addr);
     char ip[1000];
     strcpy(ip,ip_s);
-    //printf("%s\n",ip);
-    /*
-    FILE*fp_con=fopen("./config.txt","r");
-    char *keyword[1024];
-    char*line_con=NULL;
-    size_t len_con=0;
-    int flag=0;
-    */
     char* LOGGER_FD=getenv("LOGGER_FD");
     long log=strtol(LOGGER_FD,NULL,10);
     
@@ -213,77 +184,18 @@ int connect_t(int sockfd, const struct sockaddr *addr, socklen_t addrlen){
         addr_list=(struct in_addr **)host->h_addr_list; //取得IP位址
         for (i = 0; addr_list[i] != NULL; i++) {
             if(strncmp(ip,inet_ntoa(*addr_list[i]),strlen(ip))==0){
-                //printf("fail connect\n");
                 dprintf(log,"[logger] connect (%d,%s,%d) = -1\n",sockfd,ip,addrlen);
                 errno=ECONNREFUSED;
                 return -1;
             }
-            //printf("ip_addr%s\n", inet_ntoa(*addr_list[i]));
         }
     }
-    
-    /*
-    while(getline(&line_con,&len_con,fp_con)!=-1){
-        //printf("strlen:%d line : %s\n",strlen(line_con),line_con);
-        char temp[1000]="";
-        
-        strncpy(temp,line_con,strlen(line_con)-2);
-        
-        //strncpy(temp,line_get,strlen(line_get)-2);
-        //printf("strlen:%d (temp)\n",strlen(temp));
-        if(strncmp(temp,"BEGIN connect-blacklist",23)==0&&strlen(temp)==23){
-            flag++;
-            //printf("temp:%s\n",temp);
-        }
-        else if(strncmp(line_con,"END connect-blacklist",21)==0){
-            break;
-        }else if(flag){
-            //printf("ip:%s  temp:%s\n",ip,temp);
-                char *tt=strtok(temp,":");
-                //printf("tt:%s\n",tt);
-                struct hostent *host;
-                struct in_addr **addr_list;
-                int i;
 
-                host = gethostbyname(tt);
-                if (host == NULL) {
-                    printf("fail to gethost\n");
-                    return 1;
-                }
-
-                addr_list = (struct in_addr **)host->h_addr_list;
-
-                for (i = 0; addr_list[i] != NULL; i++) {
-                    if(strncmp(ip,inet_ntoa(*addr_list[i]),strlen(ip))==0){
-                        //printf("fail connect\n");
-                        dprintf(log,"[logger] connect (%d,%s,%d) = -1\n",sockfd,ip,addrlen);
-                        errno=ECONNREFUSED;
-                        return -1;
-                    }
-                    //printf("ip_addr%s\n", inet_ntoa(*addr_list[i]));
-                }
-            //printf("ip_addr:%s",ip_addr);
-            
-            //flag++;
-        }
-            
-    }
-    fclose(fp_con);
-    */
     dprintf(log,"[logger] connect (%d,%s,%d) = 0\n",sockfd,ip,addrlen);
-    //return 0;
-    return (*real_connect)(sockfd, addr,  addrlen);
+    return real_connect(sockfd, addr,  addrlen);
 }
 int getaddrinfo_t(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res){
     int ret_getaddr=real_getaddrinfo(node,service,hints,res);
-    /*
-    char*config_env=getenv("SANDBOX_CONFIG");
-    FILE*fp_get=fopen(config_env,"r");
-    char *keyword[1024];
-    char*line_get=NULL;
-    size_t len_get=0;
-    int flag=0;
-    */
     char* LOGGER_FD=getenv("LOGGER_FD");
     long log=strtol(LOGGER_FD,NULL,10);
     
@@ -291,41 +203,13 @@ int getaddrinfo_t(const char *node, const char *service, const struct addrinfo *
         if(block_list[3][i][0]=='\0'){
             break;
         }
-        printf("node:%s block:%s\n",node,block_list[3][i]);
+        //printf("node:%s block:%s\n",node,block_list[3][i]);
         if(strcmp(node,block_list[3][i])==0){
             dprintf(log,"[logger] getaddrinfo (%s,%s,%p,%p) = %d\n",node,service,hints,res,EAI_NONAME);
             errno=EAI_NONAME;
             return EAI_NONAME;
         }
     }
-    
-    /*
-    while(getline(&line_get,&len_get,fp_get)!=-1){
-        //printf("strlen:%d line : %s\n",strlen(line_get),line_get);
-        char temp[1000]="";
-        strncpy(temp,line_get,strlen(line_get)-2);
-        //strncpy(temp,line_get,strlen(line_get)-2);
-        //printf("strlen:%d (temp)\n",strlen(temp));
-        if(strncmp(temp,"BEGIN getaddrinfo-blacklist",27)==0){
-            flag++;
-            //printf("match\n");
-        }
-        else if(strncmp(line_get,"END getaddrinfo-blacklist",23)==0){
-            break;
-        }else if(flag){
-            //printf("node %s temp %s\n",node,temp);
-            if(strncmp(node,temp,strlen(temp))==0){
-                //printf("fail getaddrinfo\n");
-                dprintf(log,"[logger] getaddrinfo (%s,%s,%p,%p) = -2\n",node,service,hints,res);
-                return EAI_NONAME;
-            }
-            flag++;
-        }
-    }
-    
-    fclose(fp_get);
-    */
-    
     dprintf(log,"[logger] getaddrinfo (%s,%s,%p,%p) = %d\n",node,service,hints,res,ret_getaddr);
     return ret_getaddr;
 }
@@ -337,48 +221,72 @@ int system_t(const char *command){
     int ret=real_system(command);
     return ret;
 }
-
-int init_t(char**argv) {
+void memory_hack(){
     FILE*fp_base=fopen("/proc/self/maps","r");
     if(fp_base==-1){
         printf("can not open\n");
-        //return -1;
+        return ;
     }
-    //printf("%s\n",argv[1]);
-    
-    //printf("ok\n");
     char*line=NULL;
     size_t len=0;
     unsigned long addr_array[5];
     int count=0;
     while(getline(&line,&len,fp_base)!=-1){
-        printf("%s\n",line);
+        //printf("%s\n",line);
 		char*buf=strtok(line,"-");
 		long number=strtol(buf,NULL,16);
 		addr_array[count++]=number;
         if(count==5) break;
-        //printf("addr[%d]: %p\n",count-1,number);
-        
 	}
     fclose(fp_base);
-    //printf("ok\n");
-    //if(mprotect(addr_array[3],addr_array[4]-addr_array[3],PROT_WRITE|PROT_READ)){
-      //  perror("can not mprotect");
-    //}
-    //printf("addr_array[3]: %p addr_array[4]: %p\n",addr_array[3],addr_array[4]);
-    unsigned long base=addr_array[0];
+    if(mprotect(addr_array[3],addr_array[4]-addr_array[3],PROT_WRITE|PROT_READ)){
+        perror("can not mprotect");
+    }
 
+    unsigned long base=addr_array[0];
+    int size=sizeof(call_addr)/sizeof(call_addr[0]);
+    for(int i=0;i<size;i++){
+        if(call_addr[i]==0) continue;
+        call_addr[i]=base+call_addr[i];
+        void (*addr)();
+        switch(i){
+            case 0:
+                real_open=open;
+                addr=open_t;
+                break;
+            case 1:
+                real_read=read;
+                addr=read_t;
+                //*(call_addr[i])=read_t;
+                break;
+            case 2:
+                real_connect=connect;
+                addr=connect_t;
+                break;
+            case 3:
+                real_getaddrinfo=getaddrinfo;
+                addr=getaddrinfo_t;
+                break;
+            case 4:
+                real_system=system;
+                addr=system_t;
+                break;
+            case 5:
+                real_write=write;
+                addr=write_t;
+                break;
+        }
+        unsigned long* temp=call_addr[i];
+        *temp=addr;
+    }
+}
+int init_t() {
     char filename[100]="";
     if(realpath("/proc/self/exe",filename)==NULL){
         fprintf(stderr,"Failed exist");
         exit(EXIT_FAILURE);
     }
     FILE*fp=fopen(filename,"rb");
-    //printf("%s\n",filename);
-    
-    //char *filename = argv;
-    //printf("%s\n",filename);
-    //FILE *fp = fopen(filename, "rb");
     if (!fp) {
         fprintf(stderr, "Failed to open file %s\n", filename);
         exit(EXIT_FAILURE);
@@ -393,13 +301,13 @@ int init_t(char**argv) {
     //printf("elf\n");
 
     // 计算重定位表的地址和大小
-    Elf64_Shdr *shdr_table = (Elf64_Shdr *)malloc(sizeof(Elf64_Shdr) * elf_header.e_shnum);
+    Elf64_Shdr *shdr_table = (Elf64_Shdr *)malloc(sizeof(Elf64_Shdr) * elf_header.e_shnum); //e_shnum = number of section
     if (!shdr_table) {
         fprintf(stderr, "Failed to allocate memory for section header table\n");
         exit(EXIT_FAILURE);
     }
 
-    fseek(fp, elf_header.e_shoff, SEEK_SET);// section header start 
+    fseek(fp, elf_header.e_shoff, SEEK_SET);// e_shoff = section header table offset
     if (fread(shdr_table, sizeof(Elf64_Shdr), elf_header.e_shnum, fp) != elf_header.e_shnum) {
         fprintf(stderr, "Failed to read section header table from file %s\n", filename);
         exit(EXIT_FAILURE);
@@ -484,136 +392,28 @@ int init_t(char**argv) {
         fprintf(stderr, "Failed to read string table from file %s\n", filename);
         exit(EXIT_FAILURE);
     }
-    // for(int i=0;i<strtab_hdr->sh_size;i++){
-    //     // if(!strncmp(&strtab[i],"open",4)){
-    //         printf("%s %d\n",&strtab[i],i);
 
-    // }
-    // 在重定位表中查找 open 函数的符号
-    //printf("ok\n");
-    unsigned long read_addr=0;
-    unsigned long open_addr=0;
-    unsigned long write_addr=0;
-    unsigned long connect_addr=0;
-    unsigned long getaddrinfo_addr=0;
-    unsigned long system_addr=0;
-    ssize_t (*my_read)(int , void *, size_t )=NULL;
-    int (*my_open)(const char *,int,mode_t)=NULL;
-    ssize_t (*my_write)(int , const void *, size_t )=NULL;
-    int (*my_connect)(int , const struct sockaddr *, socklen_t )=NULL;
-    int (*my_getaddrinfo)(const char *, const char *, const struct addrinfo *, struct addrinfo **)=NULL;
-    int (*my_system)(const char *)=NULL;
     for (int i = 0; i < num_relocations; i++) {
         Elf64_Rela *rela = &relocations[i];
         // printf("%d,%ld,%ld\n",i,ELF64_R_TYPE(rela->r_info),R_X86_64_JUMP_SLOT);
-        if (ELF64_R_TYPE(rela->r_info) == R_X86_64_JUMP_SLOT) {
+        //R_X86_64_JUMP_SLOT，dynamic linker will modify the corresponding symbol reference to point to the address of the function in the shared library
+        if (ELF64_R_TYPE(rela->r_info) == R_X86_64_JUMP_SLOT) { 
+            //ELF64_R_SYM(rela->r_info) = the index of symbol table
             Elf64_Sym *sym = &symbols[ELF64_R_SYM(rela->r_info)];
+            //st_name = the index of string table
             char *symname = &strtab[sym->st_name];
-            
-            //printf("%s %lx st_name:%d\n",symname,rela->r_offset,sym->st_name);
-            // printf("o")
-            if (strcmp(symname, "read") == 0 ) {
-                read_addr=rela->r_offset;
-                unsigned long *real_read_addr=(unsigned long*)(base+read_addr);
-                int page_size=getpagesize();
-
-                if(mprotect((base+read_addr)-((base+read_addr)%page_size),page_size,PROT_WRITE|PROT_READ)){
-                    perror("can not mprotect");
+            for(int j=0;j<sizeof(call_list)/sizeof(call_list[0]);j++){
+                if(strcmp(symname,call_list[j])==0){
+                    call_addr[j]=rela->r_offset;
                 }
-                //printf("real_read:%p\n",real_read_addr);
-                real_read=*real_read_addr;
-                my_read=read_t;
-                *real_read_addr=my_read;
-
-                printf("Found read at index %d, offset 0x%lx\n", i, rela->r_offset);
-            }else if(strcmp(symname,"open")==0){
-                open_addr=rela->r_offset;
-                unsigned long *real_open_addr=(unsigned long*)(base+open_addr);
-                int page_size=getpagesize();
-
-                if(mprotect((base+open_addr)-((base+open_addr)%page_size),page_size,PROT_WRITE|PROT_READ)){
-                    perror("can not mprotect");
-                }
-                //printf("real_open:%p\n",real_open_addr);
-                real_open=*real_open_addr;
-                my_open=open_t;
-                *real_open_addr=my_open;
-                printf("Found open at index %d, offset 0x%lx\n", i, rela->r_offset);
-            }else if(strcmp(symname,"write")==0 ){
-                write_addr=rela->r_offset;
-                unsigned long*real_write_addr=(unsigned long*)(base+write_addr);
-                printf("real_write:%p base %p\n",real_write_addr,base);
-                real_write=*real_write_addr;
-                my_write=write_t;
-                *real_write_addr=my_write;
-                printf("Found write at index %d, offset 0x%lx\n", i, rela->r_offset);
-            }else if(strcmp(symname,"connect")==0 ){
-                connect_addr=rela->r_offset;
-                unsigned long*real_connect_addr=(unsigned long*)(base+connect_addr);
-                int page_size=getpagesize();
-
-                if(mprotect((base+connect_addr)-((base+connect_addr)%page_size),page_size,PROT_WRITE|PROT_READ)){
-                    perror("can not mprotect");
-                }
-                real_connect=*real_connect_addr;
-                my_connect=connect_t;
-                *real_connect_addr=my_connect;
-                printf("Found connect at index %d, offset 0x%lx\n", i, rela->r_offset);
-            }else if(strcmp(symname,"getaddrinfo")==0 ){
-                
-                getaddrinfo_addr=rela->r_offset;
-                printf("getaddrinfo_addr:%lx\n",getaddrinfo_addr);
-                unsigned long*real_getaddrinfo_addr=(unsigned long*)(base+getaddrinfo_addr);
-                int page_size=getpagesize();
-                uint64_t start_addr=(base+getaddrinfo_addr)-((base+getaddrinfo_addr)%page_size);
-                if(mprotect(start_addr,page_size,PROT_WRITE|PROT_READ)){
-                    perror("can not mprotect");
-                }
-                //printf("start : 0x%lx real_getaddrinfo_addr:0x%lx\n",start_addr ,real_getaddrinfo_addr);
-                real_getaddrinfo=*real_getaddrinfo_addr;
-                my_getaddrinfo=getaddrinfo_t;
-                *real_getaddrinfo_addr=my_getaddrinfo;
-                printf("Found getaddrinfo at index %d, offset 0x%lx\n", i, rela->r_offset);
-            }else if(strcmp(symname,"system")==0 ){
-                system_addr=rela->r_offset;
-                unsigned long*real_system_addr=(unsigned long*)(base+system_addr);
-                int page_size=getpagesize();
-
-                if(mprotect((base+system_addr)-((base+system_addr)%page_size),page_size,PROT_WRITE|PROT_READ)){
-                    perror("can not mprotect");
-                }
-                real_system=*real_system_addr;
-                my_system=system_t;
-                *real_system_addr=my_system;
-                printf("Found system at index %d, offset 0x%lx\n", i, rela->r_offset);
             }
         }
     }
-
     fclose(fp);
     free(relocations);
     free(symbols);
     free(strtab);
-    //system("cat /proc/self/maps");
-    printf("--------------hw1_gpt\n");
-    
-    
-    
-
-    
-
-    //void*handle=dlopen("libtest.so",RTLD_LAZY);
-    //unsigned long* my_open=NULL;
-    //if(handle!=NULL) my_open=dlsym(handle,"open_t");
-    //*real_open_addr=func_open_t;
-    //printf("open_t ok\n");
-    //dlclose(handle);
-    
-    
-
-    //open();
-    
-
+    memory_hack();
     return 0;
 }
 
