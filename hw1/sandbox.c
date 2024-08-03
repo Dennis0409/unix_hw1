@@ -27,6 +27,7 @@ read : 1
 connect : 2
 getaddrinfo : 3
 */
+
 void block_string(); 
 int __libc_start_main(int *(main) (int, char * *, char * *), int argc, char * * argv, void (*init) (void), void (*fini) (void), void (*rtld_fini) (void), void (* stack_end)){
     // Load the real __libc_start_main
@@ -120,6 +121,7 @@ ssize_t read_t(int fd,void*buf,size_t count){
             if(strstr(prev_buf,block_list[1][i])!=NULL){
                 errno=EIO;
                 dprintf(log,"[logger] read (%d,%p,%ld) = -1\n",fd,&buf,count);
+                close(fd);
                 return -1;
             }
             memset(prev_buf,0,sizeof(prev_buf));
@@ -128,6 +130,7 @@ ssize_t read_t(int fd,void*buf,size_t count){
             if(strstr(write_buf,block_list[1][i])!=NULL){
                 errno=EIO;
                 dprintf(log,"[logger] read (%d,%p,%ld) = -1\n",fd,&buf,count);
+                close(fd);
                 return -1;
             }
         }
@@ -269,6 +272,7 @@ void memory_hack(){
                 break;
             case 4:
                 real_system=system;
+                printf("system\n");
                 addr=system_t;
                 break;
             case 5:
